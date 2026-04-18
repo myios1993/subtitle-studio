@@ -10,6 +10,7 @@ import VideoPlayer from '../components/VideoPlayer.vue'
 import SubtitleEditor from '../components/SubtitleEditor.vue'
 import PipelineControls from '../components/PipelineControls.vue'
 import ExportButton from '../components/ExportButton.vue'
+import { segmentsApi } from '../api/segments'
 
 // ---------------------------------------------------------------------------
 // Props / Router
@@ -206,6 +207,35 @@ async function onSpeakerLabelBlur(speaker: Speaker) {
 }
 
 // ---------------------------------------------------------------------------
+// Empty-segment cleanup prompt
+// ---------------------------------------------------------------------------
+async function promptDeleteEmptySegments(field: 'original_text' | 'translated_text') {
+  if (!store.project) return
+  const label = field === 'original_text' ? '识别文字' : '译文'
+  const emptySegs = store.segments.filter(s =>
+    field === 'original_text'
+      ? !s.original_text?.trim()
+      : !s.translated_text?.trim()
+  )
+  if (emptySegs.length === 0) return
+
+  const yes = confirm(
+    `处理完成后仍有 ${emptySegs.length} 条字幕的【${label}】为空（有时间点但无内容），` +
+    `可能是识别错误或识别置信度过低。\n\n是否删除这些空白字幕？`
+  )
+  if (!yes) return
+
+  try {
+    const res = await segmentsApi.deleteEmpty(store.project.id, field)
+    if (res.deleted > 0) {
+      store.removeSegmentsByIds(emptySegs.map(s => s.id))
+    }
+  } catch (e) {
+    console.error('删除空白字幕失败', e)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // VideoPlayer ref for seekTo coordination
 // ---------------------------------------------------------------------------
 function onVideoTimeUpdate(_ms: number) {
@@ -235,6 +265,8 @@ function handleWsEvent(e: WsEvent) {
       pipeline.setActive(false)
       store.updateProjectStatus('done')
       store.loadProject(projectId.value).catch(() => {})
+      // Reload segments then prompt about empty ones
+      store.loadSegments().then(() => promptDeleteEmptySegments('original_text')).catch(() => {})
       break
     case 'pipeline_error':
       pipeline.setActive(false)
@@ -255,7 +287,7 @@ function handleWsEvent(e: WsEvent) {
       break
     case 'translation_done':
       pipeline.setTranslating(false, 1)
-      store.loadSegments().catch(() => {})
+      store.loadSegments().then(() => promptDeleteEmptySegments('translated_text')).catch(() => {})
       break
     case 'translation_error':
       pipeline.setTranslating(false, 0)
@@ -296,7 +328,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-900 text-white flex flex-col">
+  <div class="h-screen bg-gray-900 text-white flex flex-col overflow-hidden">
 
     <!-- ======================================================================
          HEADER BAR
@@ -509,19 +541,22 @@ onUnmounted(() => {
 
           <!-- Video + subtitle (side by side when video exists on lg+) -->
           <template v-if="hasVideo">
-            <!-- VIDEO COLUMN -->
-            <div class="w-full lg:w-1/2 xl:w-2/5 flex-shrink-0 flex flex-col overflow-hidden border-r border-gray-700">
-              <div class="p-3">
+            <!-- VIDEO COLUMN: overflow-y-auto so extra content below the player
+                 (speakers on small screens) can scroll, while the player itself
+                 stays sticky at the top of the column. -->
+            <div class="w-80 lg:w-1/2 xl:w-2/5 flex-shrink-0 flex flex-col overflow-y-auto border-r border-gray-700">
+              <!-- Sticky video wrapper — always visible even when column scrolls -->
+              <div class="sticky top-0 z-10 bg-gray-900 p-3">
                 <VideoPlayer
                   :project-id="projectId"
                   @timeupdate="onVideoTimeUpdate"
                 />
               </div>
 
-              <!-- Speakers panel on small screens (below video) -->
+              <!-- Speakers panel on small screens (below video, non-sticky) -->
               <div
                 v-if="project.speakers && project.speakers.length > 0"
-                class="lg:hidden border-t border-gray-700 p-3"
+                class="lg:hidden border-t border-gray-700 p-3 flex-shrink-0"
               >
                 <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">说话人</h2>
                 <div class="flex flex-wrap gap-2">

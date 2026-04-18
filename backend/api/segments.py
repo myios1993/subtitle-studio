@@ -4,7 +4,7 @@ SubtitleSegment CRUD API endpoints.
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select, func, delete as sa_delete
+from sqlalchemy import select, func, delete as sa_delete, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -152,6 +152,72 @@ async def delete_segment(
         raise HTTPException(status_code=404, detail="Segment not found")
     await db.delete(segment)
     await db.commit()
+
+
+class ClearTranslationsBody(BaseModel):
+    ids: list[int] | None = None  # None = clear ALL for project
+
+
+@router.post("/clear-translations", status_code=status.HTTP_200_OK)
+async def clear_translations(
+    project_id: int,
+    body: ClearTranslationsBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Set translated_text = NULL for selected or all segments.
+    ids=None clears all translations in the project."""
+    if body.ids is not None:
+        if not body.ids:
+            return {"cleared": 0}
+        stmt = (
+            sa_update(SubtitleSegment)
+            .where(
+                SubtitleSegment.project_id == project_id,
+                SubtitleSegment.id.in_(body.ids),
+            )
+            .values(translated_text=None)
+        )
+    else:
+        stmt = (
+            sa_update(SubtitleSegment)
+            .where(SubtitleSegment.project_id == project_id)
+            .values(translated_text=None)
+        )
+    result = await db.execute(stmt)
+    await db.commit()
+    return {"cleared": result.rowcount}
+
+
+class DeleteEmptyBody(BaseModel):
+    field: str = "original_text"  # "original_text" or "translated_text"
+
+
+@router.post("/delete-empty", status_code=status.HTTP_200_OK)
+async def delete_empty_segments(
+    project_id: int,
+    body: DeleteEmptyBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete segments where the given field is NULL or empty string.
+    field: 'original_text' (no ASR result) or 'translated_text' (no translation)."""
+    if body.field == "original_text":
+        stmt = sa_delete(SubtitleSegment).where(
+            SubtitleSegment.project_id == project_id,
+            (SubtitleSegment.original_text.is_(None))
+            | (SubtitleSegment.original_text == ""),
+        )
+    elif body.field == "translated_text":
+        stmt = sa_delete(SubtitleSegment).where(
+            SubtitleSegment.project_id == project_id,
+            (SubtitleSegment.translated_text.is_(None))
+            | (SubtitleSegment.translated_text == ""),
+        )
+    else:
+        raise HTTPException(status_code=400, detail="field must be 'original_text' or 'translated_text'")
+
+    result = await db.execute(stmt)
+    await db.commit()
+    return {"deleted": result.rowcount}
 
 
 @router.post("/bulk-delete", status_code=status.HTTP_200_OK)
