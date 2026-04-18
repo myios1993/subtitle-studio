@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Models (large binary files)
+models/whisper/*
+models/pyannote/*
+!models/whisper/.gitkeep
+!models/pyannote/.gitkeep
+
+# Database
+data/*.db
+data/*.db-journal
+data/uploads/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Node
+node_modules/
+frontend/dist/
+
+# OS
+Thumbs.db
+.DS_Store
