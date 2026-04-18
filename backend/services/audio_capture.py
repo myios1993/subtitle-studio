@@ -323,6 +323,11 @@ class FileCapture(CaptureBase):
     """
     Extract and decode audio from a local file (audio or video) via ffmpeg.
     Outputs 16kHz mono float32 PCM without intermediate temp files.
+
+    Args:
+        start_offset_ms: If > 0, seek to this position before reading.
+                         Used to resume an interrupted pipeline from the last
+                         committed segment's end time.
     """
 
     def __init__(
@@ -330,9 +335,11 @@ class FileCapture(CaptureBase):
         buffer: AudioBuffer,
         loop: asyncio.AbstractEventLoop,
         file_path: str,
+        start_offset_ms: int = 0,
     ):
         super().__init__(buffer, loop)
         self._file_path = file_path
+        self._start_offset_ms = start_offset_ms
 
     def _capture_loop(self) -> None:
         file_path = Path(self._file_path)
@@ -341,10 +348,20 @@ class FileCapture(CaptureBase):
             asyncio.run_coroutine_threadsafe(self._buffer.flush(), self._loop)
             return
 
-        logger.info(f"File capture started: {file_path}")
+        if self._start_offset_ms > 0:
+            logger.info(
+                f"File capture started (resuming from {self._start_offset_ms}ms): {file_path}"
+            )
+        else:
+            logger.info(f"File capture started: {file_path}")
 
-        ffmpeg_cmd = [
-            settings.ffmpeg_path,
+        # Build ffmpeg command; seek with -ss before -i for fast stream seek
+        ffmpeg_cmd = [settings.ffmpeg_path]
+        if self._start_offset_ms > 0:
+            start_s = self._start_offset_ms / 1000.0
+            ffmpeg_cmd += ["-ss", f"{start_s:.3f}"]
+
+        ffmpeg_cmd += [
             "-i", str(file_path),
             "-vn",                   # discard video
             "-ar", str(TARGET_RATE), # resample to 16kHz
@@ -481,6 +498,7 @@ def create_capture(
     loop: asyncio.AbstractEventLoop,
     device_index: Optional[int] = None,
     file_path: Optional[str] = None,
+    start_offset_ms: int = 0,
 ) -> CaptureBase:
     """
     Factory: create the appropriate capture backend.
@@ -491,6 +509,8 @@ def create_capture(
         loop: The running asyncio event loop
         device_index: Audio device index (for mic/loopback modes)
         file_path: Path to audio/video file (for file mode)
+        start_offset_ms: Seek offset in ms for file mode (0 = from start).
+                         Set to the last committed segment's end_ms to resume.
 
     Returns:
         A CaptureBase instance (not yet started — call .start())
@@ -502,6 +522,6 @@ def create_capture(
     elif mode == "file":
         if not file_path:
             raise ValueError("file_path is required for file capture mode")
-        return FileCapture(buffer, loop, file_path)
+        return FileCapture(buffer, loop, file_path, start_offset_ms=start_offset_ms)
     else:
         raise ValueError(f"Unknown capture mode: {mode}")

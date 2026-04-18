@@ -26,4 +26,12 @@ export const segmentsApi = {
   /** Delete multiple segments by id. */
   bulkDelete: (projectId: number, ids: number[]) =>
     api.post<{ deleted: number }>(`/projects/${projectId}/segments/bulk-delete`, ids),
+
+  /** Clear translated_text for selected or all segments (ids=undefined → all). */
+  clearTranslations: (projectId: number, ids?: number[]) =>
+    api.post<{ cleared: number }>(`/projects/${projectId}/segments/clear-translations`, { ids: ids ?? null }),
+
+  /** Delete segments where original_text or translated_text is empty. */
+  deleteEmpty: (projectId: number, field: 'original_text' | 'translated_text') =>
+    api.post<{ deleted: number }>(`/projects/${projectId}/segments/delete-empty`, { field }),
 }

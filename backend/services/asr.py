@@ -143,11 +143,23 @@ class ASRService:
         Returns:
             ASRResult with segments containing absolute timestamps.
         """
+        # Provide an initial prompt to bias Whisper toward Simplified Chinese
+        # when the target language is Chinese or unknown (auto-detect).
+        # This prevents Whisper from defaulting to Traditional Chinese for Mandarin.
+        if language in (None, "zh", "zh-CN"):
+            initial_prompt = (
+                "以下是普通话的转录，使用简体中文，"
+                "不使用繁体字。"
+            )
+        else:
+            initial_prompt = None
+
         segments_gen, info = self._model.transcribe(
             audio,
             language=language,
             word_timestamps=True,
             vad_filter=True,
+            initial_prompt=initial_prompt,
             vad_parameters={
                 "min_silence_duration_ms": 500,
                 "speech_pad_ms": 200,

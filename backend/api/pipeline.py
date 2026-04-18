@@ -36,6 +36,7 @@ class PipelineStartRequest(BaseModel):
     file_path: Optional[str] = Field(None, description="Override file path")
     language: Optional[str] = Field(None, description="Force ASR language (e.g. 'en', 'zh')")
     num_speakers: Optional[int] = Field(None, ge=1, le=20, description="Expected number of speakers (hint for diarization)")
+    resume: bool = Field(False, description="Resume from last saved segment (file mode only)")
 
 
 @router.post("/{project_id}/start")
@@ -73,6 +74,7 @@ async def start_pipeline_endpoint(
             file_path=file_path,
             language=body.language,
             num_speakers=body.num_speakers,
+            resume=body.resume,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -106,13 +108,30 @@ async def stop_pipeline_endpoint(
     return {"message": "Pipeline stopped", "project_id": project_id}
 
 
+class TranslateRequest(BaseModel):
+    source_lang: Optional[str] = Field(
+        None,
+        description="Override source language for this run (e.g. 'en', 'zh'). "
+                    "None = use per-segment original_language.",
+    )
+    segment_ids: Optional[list[int]] = Field(
+        None,
+        description="Translate only these segment IDs. None = all untranslated.",
+    )
+    retranslate: bool = Field(
+        False,
+        description="If True, re-translate already-translated segments too.",
+    )
+
+
 @router.post("/{project_id}/translate")
 async def translate_pipeline(
     project_id: int,
+    body: TranslateRequest = TranslateRequest(),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Start translation of all untranslated segments for a project.
+    Start translation of segments for a project.
     Runs asynchronously; progress is broadcast via WebSocket
     (translation_progress / translation_done events).
     """
@@ -128,6 +147,11 @@ async def translate_pipeline(
             detail="Translation already in progress for this project",
         )
 
+    # Capture body fields for use inside the async closure
+    _source_lang = body.source_lang
+    _segment_ids = body.segment_ids
+    _retranslate = body.retranslate
+
     async def _run_translation():
         from backend.services.translation import TranslationService
         from backend.websocket.hub import ws_manager
@@ -136,7 +160,12 @@ async def translate_pipeline(
                 project_id, "translation_started", {"project_id": project_id}
             )
             svc = TranslationService()
-            await svc.translate_segments(project_id, segment_ids=None)
+            await svc.translate_segments(
+                project_id,
+                segment_ids=_segment_ids,
+                source_lang_override=_source_lang,
+                retranslate=_retranslate,
+            )
             await ws_manager.broadcast(
                 project_id, "translation_done", {"project_id": project_id}
             )

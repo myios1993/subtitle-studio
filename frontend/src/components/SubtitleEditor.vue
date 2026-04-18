@@ -34,13 +34,9 @@ function formatTime(ms: number): string {
 const selectedIds = ref<Set<number>>(new Set())
 
 function toggleSelect(id: number) {
-  // Rebuild the Set so Vue's reactivity system detects the mutation
   const next = new Set(selectedIds.value)
-  if (next.has(id)) {
-    next.delete(id)
-  } else {
-    next.add(id)
-  }
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
   selectedIds.value = next
 }
 
@@ -66,6 +62,84 @@ async function onBulkDelete() {
     console.error('批量删除失败:', e.message)
   } finally {
     bulkDeleting.value = false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Clear translations
+// ---------------------------------------------------------------------------
+const clearingTrans = ref(false)
+
+async function onClearTranslationsSelected() {
+  if (selectedIds.value.size === 0 || !store.project) return
+  if (!confirm(`清空所选 ${selectedIds.value.size} 条字幕的译文？`)) return
+  clearingTrans.value = true
+  const ids = [...selectedIds.value]
+  try {
+    await segmentsApi.clearTranslations(store.project.id, ids)
+    ids.forEach(id => store.patchSegment({ id, translated_text: null }))
+    clearSelection()
+  } catch (e: any) {
+    console.error('清空译文失败:', e.message)
+  } finally {
+    clearingTrans.value = false
+  }
+}
+
+async function onClearAllTranslations() {
+  if (!store.project) return
+  if (!confirm('清空该项目所有字幕的译文？')) return
+  clearingTrans.value = true
+  try {
+    await segmentsApi.clearTranslations(store.project.id)
+    store.segments.forEach(s => store.patchSegment({ id: s.id, translated_text: null }))
+    clearSelection()
+  } catch (e: any) {
+    console.error('清空全部译文失败:', e.message)
+  } finally {
+    clearingTrans.value = false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Delete empty segments (no original text or no translation)
+// ---------------------------------------------------------------------------
+const deletingEmpty = ref(false)
+
+async function checkAndDeleteEmpty(field: 'original_text' | 'translated_text') {
+  if (!store.project) return
+  const label = field === 'original_text' ? '识别文字' : '译文'
+
+  // Count locally first
+  const emptyCount = store.segments.filter(s =>
+    field === 'original_text'
+      ? !s.original_text?.trim()
+      : !s.translated_text?.trim()
+  ).length
+
+  if (emptyCount === 0) return
+
+  if (!confirm(
+    `发现 ${emptyCount} 条字幕的${label}为空（有时间点但无内容），可能是识别错误。\n是否删除这些空白字幕？`
+  )) return
+
+  deletingEmpty.value = true
+  try {
+    const res = await segmentsApi.deleteEmpty(store.project.id, field)
+    if (res.deleted > 0) {
+      const emptyIds = store.segments
+        .filter(s =>
+          field === 'original_text'
+            ? !s.original_text?.trim()
+            : !s.translated_text?.trim()
+        )
+        .map(s => s.id)
+      store.removeSegmentsByIds(emptyIds)
+    }
+  } catch (e: any) {
+    console.error('删除空白字幕失败:', e.message)
+  } finally {
+    deletingEmpty.value = false
   }
 }
 
@@ -123,12 +197,11 @@ function onSegmentClick(seg: Segment) {
 }
 
 // ---------------------------------------------------------------------------
-// Save / delete forwarded from SegmentRow (legacy path — row now calls store directly)
+// Delete single
 // ---------------------------------------------------------------------------
 async function onDelete(id: number) {
   if (confirm('确定删除这条字幕？')) {
     await store.deleteSegment(id)
-    // Also remove from selection if present
     if (selectedIds.value.has(id)) {
       const next = new Set(selectedIds.value)
       next.delete(id)
@@ -141,34 +214,19 @@ async function onDelete(id: number) {
 // Global keyboard shortcuts
 // ---------------------------------------------------------------------------
 function onGlobalKey(e: KeyboardEvent) {
-  // Ignore if user is typing in an input/textarea (except the shortcuts we explicitly want)
   const tag = (e.target as HTMLElement).tagName
   const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
 
   if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
-    // Undo is allowed even inside text areas so the global undo fires
-    if (!inField) {
-      e.preventDefault()
-      store.undo()
-    }
+    if (!inField) { e.preventDefault(); store.undo() }
   }
-  if (
-    (e.ctrlKey || e.metaKey) &&
-    (e.key === 'y' || (e.key === 'z' && e.shiftKey))
-  ) {
-    if (!inField) {
-      e.preventDefault()
-      store.redo()
-    }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+    if (!inField) { e.preventDefault(); store.redo() }
   }
 }
 
-onMounted(() => {
-  window.addEventListener('keydown', onGlobalKey)
-})
-onUnmounted(() => {
-  window.removeEventListener('keydown', onGlobalKey)
-})
+onMounted(() => window.addEventListener('keydown', onGlobalKey))
+onUnmounted(() => window.removeEventListener('keydown', onGlobalKey))
 
 // ---------------------------------------------------------------------------
 // Auto-scroll active segment into view
@@ -191,8 +249,9 @@ watch(
   <div class="flex flex-col h-full">
 
     <!-- ===== Toolbar ===== -->
-    <div class="flex items-center gap-1 px-3 py-1.5 border-b border-gray-800 bg-gray-900/60">
-      <!-- Undo -->
+    <div class="flex items-center gap-1 px-3 py-1.5 border-b border-gray-800 bg-gray-900/60 flex-wrap min-h-0">
+
+      <!-- History -->
       <button
         @click="store.undo()"
         :disabled="!historyStore.canUndo"
@@ -208,7 +267,6 @@ watch(
         撤销
       </button>
 
-      <!-- Redo -->
       <button
         @click="store.redo()"
         :disabled="!historyStore.canRedo"
@@ -224,10 +282,9 @@ watch(
         重做
       </button>
 
-      <!-- Separator -->
-      <div class="w-px h-4 bg-gray-700 mx-1 shrink-0" />
+      <div class="w-px h-4 bg-gray-700 mx-0.5 shrink-0" />
 
-      <!-- Bulk delete (visible when ≥1 selected) -->
+      <!-- Selection-dependent actions -->
       <button
         v-if="selectedIds.size >= 1"
         @click="onBulkDelete"
@@ -239,10 +296,9 @@ watch(
         <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
           <path d="M3 4 h10 M6 4 V2 h4 V4 M5 4 v9 h6 V4" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        删除 ({{ selectedIds.size }})
+        删除 {{ selectedIds.size }} 条
       </button>
 
-      <!-- Merge (visible only when ≥2 selected) -->
       <button
         v-if="selectedIds.size >= 2"
         @click="onMerge"
@@ -254,10 +310,25 @@ watch(
           <path d="M3 4 h10 M3 8 h6 M3 12 h10" stroke-linecap="round"/>
           <path d="M11 6 L14 8 L11 10" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        合并 ({{ selectedIds.size }})
+        合并 {{ selectedIds.size }} 条
       </button>
 
-      <!-- Cancel selection -->
+      <!-- Clear translation: selected only -->
+      <button
+        v-if="selectedIds.size >= 1"
+        @click="onClearTranslationsSelected"
+        :disabled="clearingTrans"
+        class="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors
+               text-purple-400 hover:text-white hover:bg-purple-600/60 disabled:opacity-40"
+        title="清空所选字幕的译文（保留时间轴和原文，可重新翻译）"
+      >
+        <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M4 2 h8 M4 2 L4 14 M12 2 L12 14 M1 5 h14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M6 6 L10 10 M10 6 L6 10" stroke-linecap="round" stroke-width="1.5"/>
+        </svg>
+        清空译文 ({{ selectedIds.size }})
+      </button>
+
       <button
         v-if="selectedIds.size > 0"
         @click="clearSelection"
@@ -267,12 +338,56 @@ watch(
         取消选择
       </button>
 
-      <!-- Right spacer + meta info -->
-      <div class="ml-auto flex items-center gap-3 text-xs text-gray-500 select-none">
-        <span>{{ displaySegments.length }} 条字幕</span>
-        <span v-if="pipeline.active" class="text-blue-400 animate-pulse flex items-center gap-1">
+      <div v-if="selectedIds.size > 0" class="w-px h-4 bg-gray-700 mx-0.5 shrink-0" />
+
+      <!-- Global clear-all translations dropdown trigger -->
+      <button
+        @click="onClearAllTranslations"
+        :disabled="clearingTrans || store.segments.length === 0"
+        class="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors
+               text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30"
+        title="清空所有字幕的译文（保留时间轴和原文，可重新翻译）"
+      >
+        <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M2 4 h12 M3 4 L4 14 h8 L12 4" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M6 2 h4" stroke-linecap="round" stroke-width="2"/>
+        </svg>
+        清空全部译文
+      </button>
+
+      <!-- Delete empty segments button -->
+      <button
+        @click="checkAndDeleteEmpty('original_text')"
+        :disabled="deletingEmpty || store.segments.length === 0"
+        class="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors
+               text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30"
+        title="查找并删除有时间点但无识别文字的字幕"
+      >
+        <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M8 2 L8 9 M8 12 L8 13" stroke-linecap="round"/>
+          <circle cx="8" cy="8" r="6" stroke-linecap="round"/>
+        </svg>
+        清理空白字幕
+      </button>
+
+      <!-- Right: meta info -->
+      <div class="ml-auto flex items-center gap-2 text-xs text-gray-500 select-none shrink-0">
+        <span title="当前显示的字幕条数">{{ displaySegments.length }} 条字幕</span>
+        <span
+          v-if="pipeline.active"
+          class="text-blue-400 animate-pulse flex items-center gap-1"
+          title="正在进行语音识别"
+        >
           <span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-ping" />
-          识别中...
+          识别中
+        </span>
+        <span
+          v-if="pipeline.translating"
+          class="text-indigo-400 flex items-center gap-1"
+          title="正在翻译字幕"
+        >
+          <span class="inline-block w-1.5 h-1.5 rounded-full bg-indigo-400 animate-ping" />
+          翻译中
         </span>
       </div>
     </div>
@@ -288,7 +403,7 @@ watch(
       />
     </div>
 
-    <!-- ===== Split dialog (inline, fixed below search bar) ===== -->
+    <!-- ===== Split dialog ===== -->
     <Transition
       enter-active-class="transition duration-150 ease-out"
       enter-from-class="opacity-0 -translate-y-1"
@@ -303,63 +418,35 @@ watch(
       >
         <div class="flex items-center justify-between">
           <span class="text-xs font-semibold text-yellow-400">拆分字幕</span>
-          <button
-            @click="cancelSplit"
-            class="text-gray-500 hover:text-gray-200 transition-colors"
-            title="取消"
-          >
+          <button @click="cancelSplit" class="text-gray-500 hover:text-gray-200 transition-colors" title="取消">
             <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M3 3 L13 13 M13 3 L3 13" stroke-linecap="round"/>
             </svg>
           </button>
         </div>
-
-        <!-- Current split position display -->
         <div class="text-xs text-gray-300 font-mono tabular-nums">
           拆分位置：<span class="text-yellow-300">{{ formatTime(splitAtMs) }}</span>
-          <span class="text-gray-600 ml-2">
-            ({{ formatTime(splittingSegment.start_ms) }} – {{ formatTime(splittingSegment.end_ms) }})
-          </span>
+          <span class="text-gray-600 ml-2">({{ formatTime(splittingSegment.start_ms) }} – {{ formatTime(splittingSegment.end_ms) }})</span>
         </div>
-
-        <!-- Range slider -->
         <input
           type="range"
           :min="splittingSegment.start_ms + 50"
           :max="splittingSegment.end_ms - 50"
           v-model.number="splitAtMs"
           step="50"
-          class="w-full h-1.5 rounded-full appearance-none cursor-pointer
-                 bg-gray-700 accent-yellow-400"
+          class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-gray-700 accent-yellow-400"
         />
-
-        <!-- Error message -->
         <p v-if="splitError" class="text-xs text-red-400">{{ splitError }}</p>
-
-        <!-- Actions -->
         <div class="flex gap-2 justify-end">
-          <button
-            @click="cancelSplit"
-            class="px-3 py-1 rounded text-xs text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
-          >
-            取消
-          </button>
-          <button
-            @click="confirmSplit"
-            class="px-3 py-1 rounded text-xs bg-yellow-500 hover:bg-yellow-400 text-black font-medium transition-colors"
-          >
-            确认拆分
-          </button>
+          <button @click="cancelSplit" class="px-3 py-1 rounded text-xs text-gray-400 hover:text-white hover:bg-gray-700 transition-colors">取消</button>
+          <button @click="confirmSplit" class="px-3 py-1 rounded text-xs bg-yellow-500 hover:bg-yellow-400 text-black font-medium transition-colors">确认拆分</button>
         </div>
       </div>
     </Transition>
 
     <!-- ===== Segment list ===== -->
     <div class="flex-1 overflow-y-auto">
-      <div
-        v-if="displaySegments.length === 0"
-        class="text-center py-20 text-gray-600 text-sm"
-      >
+      <div v-if="displaySegments.length === 0" class="text-center py-20 text-gray-600 text-sm">
         {{ store.searchQuery ? '无匹配结果' : '暂无字幕，启动处理后将实时显示' }}
       </div>
 

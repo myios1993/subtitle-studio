@@ -491,6 +491,8 @@ class TranslationService:
         self,
         project_id: int,
         segment_ids: Optional[list[int]] = None,
+        source_lang_override: Optional[str] = None,
+        retranslate: bool = False,
     ) -> None:
         """
         Translate subtitle segments for *project_id*.
@@ -499,14 +501,14 @@ class TranslationService:
         When *segment_ids* is None, all untranslated segments for the project
         are fetched and translated.
 
-        Reads segments from DB, translates in batches of *BATCH_SIZE*, writes
-        translated_text back, and broadcasts segment_updated WebSocket events
-        after each batch.
-
         Args:
             project_id:  Project these segments belong to.
             segment_ids: Ordered list of segment PKs to translate, or None for all
-                         untranslated segments.
+                         untranslated/all segments.
+            source_lang_override: If set, use this as source_lang for all batches
+                                  instead of per-segment original_language.
+            retranslate: If True, re-translate even segments that already have
+                         translated_text (useful for switching translators/languages).
         """
         try:
             config = await self._load_config()
@@ -540,16 +542,22 @@ class TranslationService:
                     .order_by(SubtitleSegment.start_ms)
                 )
             else:
-                # Fetch all segments for the project (untranslated first, but
-                # include already-translated ones the user may want to re-translate)
-                stmt = (
-                    select(SubtitleSegment)
-                    .where(
-                        SubtitleSegment.project_id == project_id,
-                        SubtitleSegment.translated_text.is_(None),
+                # Fetch all segments, or only untranslated ones
+                if retranslate:
+                    stmt = (
+                        select(SubtitleSegment)
+                        .where(SubtitleSegment.project_id == project_id)
+                        .order_by(SubtitleSegment.start_ms)
                     )
-                    .order_by(SubtitleSegment.start_ms)
-                )
+                else:
+                    stmt = (
+                        select(SubtitleSegment)
+                        .where(
+                            SubtitleSegment.project_id == project_id,
+                            SubtitleSegment.translated_text.is_(None),
+                        )
+                        .order_by(SubtitleSegment.start_ms)
+                    )
 
             rows = (await session.execute(stmt)).scalars().all()
 
@@ -602,14 +610,17 @@ class TranslationService:
                     },
                 )
 
-                # Determine source language from the batch's segments.
-                # Use the first non-empty original_language; fall back to "auto".
-                batch_source_lang = "auto"
-                for seg in batch:
-                    lang = (seg.original_language or "").strip()
-                    if lang:
-                        batch_source_lang = lang
-                        break
+                # Determine source language.
+                # Priority: explicit override → first non-empty segment language → "auto"
+                if source_lang_override:
+                    batch_source_lang = source_lang_override
+                else:
+                    batch_source_lang = "auto"
+                    for seg in batch:
+                        lang = (seg.original_language or "").strip()
+                        if lang:
+                            batch_source_lang = lang
+                            break
 
                 try:
                     translated = await translator.translate_batch(

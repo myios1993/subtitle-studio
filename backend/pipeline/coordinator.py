@@ -81,6 +81,7 @@ class PipelineCoordinator:
         file_path: Optional[str] = None,
         language: Optional[str] = None,
         num_speakers: Optional[int] = None,
+        resume: bool = False,
     ) -> None:
         """
         Start the processing pipeline.
@@ -91,11 +92,16 @@ class PipelineCoordinator:
             file_path: Path to audio/video file (file mode)
             language: Force ASR language (None = auto-detect)
             num_speakers: Expected number of speakers (hint for diarization)
+            resume: If True and mode=="file", seek to the last saved segment's
+                    end_ms so only unprocessed audio is transcribed.
         """
         if self._running:
             raise RuntimeError("Pipeline already running")
 
-        logger.info(f"Starting pipeline for project {self.project_id} (mode={mode})")
+        logger.info(
+            f"Starting pipeline for project {self.project_id} "
+            f"(mode={mode}, resume={resume})"
+        )
 
         # Store pipeline parameters for diarization
         self._file_path = file_path
@@ -115,6 +121,17 @@ class PipelineCoordinator:
                     lambda: ASRService(),
                 )
 
+            # For resume mode, determine seek position from last saved segment
+            last_end_ms = await self._get_last_segment_end_ms()
+            start_offset_ms = 0
+            if resume and mode == "file" and last_end_ms > 0:
+                # Seek back a little (2s) to avoid missing content at the boundary
+                start_offset_ms = max(0, last_end_ms - 2000)
+                logger.info(
+                    f"Resume mode: seeking to {start_offset_ms}ms "
+                    f"(last segment ended at {last_end_ms}ms)"
+                )
+
             # Initialize buffer and capture
             self._buffer = AudioBuffer()
             loop = asyncio.get_event_loop()
@@ -124,10 +141,12 @@ class PipelineCoordinator:
                 loop=loop,
                 device_index=device_index,
                 file_path=file_path,
+                start_offset_ms=start_offset_ms,
             )
 
-            # Reset dedup state
-            self._last_committed_end_ms = await self._get_last_segment_end_ms()
+            # Set dedup watermark so already-saved segments are not duplicated.
+            # In resume mode use last_end_ms we already fetched; otherwise fetch fresh.
+            self._last_committed_end_ms = last_end_ms
 
             self._running = True
 
@@ -629,6 +648,7 @@ async def start_pipeline(
     file_path: Optional[str] = None,
     language: Optional[str] = None,
     num_speakers: Optional[int] = None,
+    resume: bool = False,
 ) -> PipelineCoordinator:
     """Start a pipeline for a project. Returns the coordinator."""
     if project_id in _active_pipelines:
@@ -644,6 +664,7 @@ async def start_pipeline(
             file_path=file_path,
             language=language,
             num_speakers=num_speakers,
+            resume=resume,
         )
     except Exception:
         # Clean up so the project doesn't get stuck
